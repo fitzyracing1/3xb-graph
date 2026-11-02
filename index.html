@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>3XB Entity Graph</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a0f; color: #e0e0e0; font-family: 'Courier New', monospace; overflow: hidden; }
+  #canvas { width: 100vw; height: 100vh; }
+  #hud {
+    position: fixed; top: 16px; left: 16px;
+    background: rgba(0,0,0,0.8); border: 1px solid #2a2a3a;
+    padding: 14px 18px; border-radius: 8px; font-size: 12px; line-height: 2;
+    pointer-events: none;
+  }
+  #hud h2 { font-size: 15px; color: #7df7ff; margin-bottom: 4px; letter-spacing: 1px; }
+  #hud .sub { color: #888; font-size: 11px; }
+  #tooltip {
+    position: fixed; background: rgba(5,5,15,0.95); border: 1px solid #444;
+    padding: 10px 14px; border-radius: 6px; font-size: 12px; pointer-events: none;
+    display: none; max-width: 280px; line-height: 1.8; z-index: 99;
+  }
+  #tooltip b { color: #7df7ff; }
+  #tooltip .tag { color: #ff6b9d; }
+  #stats {
+    position: fixed; top: 16px; right: 16px;
+    background: rgba(0,0,0,0.8); border: 1px solid #2a2a3a;
+    padding: 14px 18px; border-radius: 8px; font-size: 12px; line-height: 2;
+    text-align: right;
+  }
+  #stats .num { color: #ffe66d; font-weight: bold; }
+  #legend {
+    position: fixed; bottom: 16px; left: 16px;
+    background: rgba(0,0,0,0.8); border: 1px solid #2a2a3a;
+    padding: 12px 16px; border-radius: 8px; font-size: 11px; line-height: 2;
+    columns: 2; column-gap: 20px;
+  }
+  #legend h3 { font-size: 11px; color: #666; margin-bottom: 4px; column-span: all; text-transform: uppercase; letter-spacing: 1px; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+  #search-bar {
+    position: fixed; bottom: 16px; right: 16px;
+    background: rgba(0,0,0,0.8); border: 1px solid #2a2a3a;
+    padding: 10px 14px; border-radius: 8px;
+  }
+  #search-bar input {
+    background: #111; border: 1px solid #333; color: #fff;
+    padding: 6px 10px; border-radius: 4px; font-family: monospace; font-size: 12px; width: 180px;
+    outline: none;
+  }
+  #search-bar input:focus { border-color: #7df7ff; }
+  #search-bar label { font-size: 11px; color: #666; display: block; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 1px; }
+</style>
+</head>
+<body>
+<svg id="canvas"></svg>
+<div id="hud">
+  <div class="sub" id="status">Loading live graph…</div>
+  <h2>3XB Entity Graph</h2>
+  <div class="sub">Drag · Scroll to zoom · Hover for detail</div>
+  <div class="sub">Node size = weight × frequency</div>
+</div>
+<div id="stats">
+  <div>Pages crawled: <span class="num" id="pcount">-</span></div>
+  <div>Total entities: <span class="num" id="ecount">-</span></div>
+  <div>Total edges: <span class="num" id="edcount">-</span></div>
+  <div>Shown: <span class="num" id="shown">-</span> nodes</div>
+</div>
+<div id="tooltip"></div>
+<div id="legend"><h3>Entity Type</h3></div>
+<div id="search-bar">
+  <label>Highlight entity</label>
+  <input id="search" type="text" placeholder="Search name..." />
+</div>
+
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+const COLOR = {
+  "Person":                  "#ff6b9d",
+  "Organization":            "#7df7ff",
+  "Location_Political":      "#ffe66d",
+  "Location_Physical":       "#a8ff78",
+  "Product":                 "#ff9f43",
+  "FinancialFigure":         "#00d2ff",
+  "Event":                   "#ee5a24",
+  "LegalEntity":             "#8c7ae6",
+  "CreativeWork":            "#fd79a8",
+  "Group_NationalOrReligious":"#fdcb6e",
+  "Facility":                "#55efc4",
+  "TemporalRef":             "#636e72",
+  "Language":                "#b2bec3",
+};
+const DEFAULT_COLOR = "#888";
+
+
+// Live data: GET /graph (nodes[name,tag,weight,frequency], edges[source,target,relation,strength])
+// plus GET /stats for global counts. Query params on this page (top_n, min_weight) pass through.
+// Override the API with ?api=https://host (e.g. for local testing).
+const PARAMS = new URLSearchParams(window.location.search);
+const API = (PARAMS.get('api') || 'https://3xb-api-production.up.railway.app').replace(/\/$/, '');
+PARAMS.delete('api');
+
+async function loadGraph() {
+  const qs = PARAMS.toString() ? '?' + PARAMS.toString() : '';
+  const res = await fetch(API + '/graph' + qs);
+  if (!res.ok) throw new Error('/graph returned ' + res.status);
+  const data = await res.json();
+  const nodes = (data.nodes || []).map(n => ({id: n.name, tag: n.tag, weight: Number(n.weight) || 0, frequency: Number(n.frequency) || 0}));
+  const ids = new Set(nodes.map(n => n.id));
+  const edges = (data.edges || []).filter(e => ids.has(e.source) && ids.has(e.target));
+  return {nodes, edges};
+}
+
+async function loadStats() {
+  try {
+    const res = await fetch(API + '/stats');
+    if (!res.ok) return;
+    const s = await res.json();
+    document.getElementById('pcount').textContent  = (s.pages_crawled ?? 0).toLocaleString();
+    document.getElementById('ecount').textContent  = (s.unique_entities ?? 0).toLocaleString();
+    document.getElementById('edcount').textContent = (s.relationship_edges ?? 0).toLocaleString();
+  } catch (e) { /* stats are optional */ }
+}
+
+function render(RAW) {
+// Stats
+document.getElementById('shown').textContent   = RAW.nodes.length;
+
+// Legend
+const tags = [...new Set(RAW.nodes.map(n => n.tag))].sort();
+const legend = document.getElementById('legend');
+tags.forEach(t => {
+  const row = document.createElement('div');
+  row.innerHTML = `<span class="dot" style="background:${COLOR[t]||DEFAULT_COLOR}"></span>${t}`;
+  legend.appendChild(row);
+});
+
+const nodes = RAW.nodes.map(d => ({...d}));
+const links = RAW.edges.map(d => ({source: d.source, target: d.target, strength: d.strength}));
+
+const W = window.innerWidth, H = window.innerHeight;
+const svg = d3.select('#canvas').attr('width', W).attr('height', H);
+const g = svg.append('g');
+
+svg.call(d3.zoom().scaleExtent([0.05, 10]).on('zoom', e => g.attr('transform', e.transform)));
+
+function radius(d) {
+  return Math.max(4, Math.min(32, 3 + Math.sqrt(d.frequency) * d.weight * 1.4));
+}
+
+const sim = d3.forceSimulation(nodes)
+  .force('link', d3.forceLink(links).id(d => d.id).distance(55).strength(0.25))
+  .force('charge', d3.forceManyBody().strength(-160))
+  .force('center', d3.forceCenter(W/2, H/2))
+  .force('collision', d3.forceCollide(d => radius(d) + 3));
+
+const link = g.append('g').selectAll('line')
+  .data(links).join('line')
+  .attr('stroke', '#ffffff14').attr('stroke-width', 0.8);
+
+const node = g.append('g').selectAll('circle')
+  .data(nodes).join('circle')
+  .attr('r', d => radius(d))
+  .attr('fill', d => COLOR[d.tag] || DEFAULT_COLOR)
+  .attr('fill-opacity', 0.82)
+  .attr('stroke', '#fff2').attr('stroke-width', 0.5)
+  .call(d3.drag()
+    .on('start', (e,d) => { if(!e.active) sim.alphaTarget(0.3).restart(); d.fx=d.x; d.fy=d.y; })
+    .on('drag',  (e,d) => { d.fx=e.x; d.fy=e.y; })
+    .on('end',   (e,d) => { if(!e.active) sim.alphaTarget(0); d.fx=null; d.fy=null; }));
+
+const label = g.append('g').selectAll('text')
+  .data(nodes.filter(d => d.frequency > 40)).join('text')
+  .text(d => d.id)
+  .attr('font-size', d => Math.max(9, Math.min(14, 7 + d.weight * 6)))
+  .attr('fill', '#ffffffbb')
+  .attr('dx', d => radius(d) + 4)
+  .attr('dy', '0.35em')
+  .style('pointer-events', 'none');
+
+const tip = document.getElementById('tooltip');
+node
+  .on('mouseover', (e, d) => {
+    tip.style.display = 'block';
+    tip.innerHTML = `<b>${d.id}</b><br><span class="tag">${d.tag}</span><br>Weight: ${d.weight.toFixed(4)}<br>Frequency: ${d.frequency.toLocaleString()}`;
+    d3.select(e.currentTarget).attr('stroke', '#fff').attr('stroke-width', 2);
+  })
+  .on('mousemove', e => {
+    tip.style.left = (e.clientX + 16) + 'px';
+    tip.style.top  = (e.clientY - 32) + 'px';
+  })
+  .on('mouseout', (e) => {
+    tip.style.display = 'none';
+    d3.select(e.currentTarget).attr('stroke', '#fff2').attr('stroke-width', 0.5);
+  });
+
+sim.on('tick', () => {
+  link.attr('x1', d=>d.source.x).attr('y1', d=>d.source.y)
+      .attr('x2', d=>d.target.x).attr('y2', d=>d.target.y);
+  node.attr('cx', d=>d.x).attr('cy', d=>d.y);
+  label.attr('x', d=>d.x).attr('y', d=>d.y);
+});
+
+// Search / highlight
+document.getElementById('search').addEventListener('input', function() {
+  const q = this.value.toLowerCase().trim();
+  if (!q) {
+    node.attr('fill-opacity', 0.82).attr('stroke', '#fff2').attr('stroke-width', 0.5);
+    return;
+  }
+  node
+    .attr('fill-opacity', d => d.id.toLowerCase().includes(q) ? 1.0 : 0.08)
+    .attr('stroke',       d => d.id.toLowerCase().includes(q) ? '#fff' : '#fff1')
+    .attr('stroke-width', d => d.id.toLowerCase().includes(q) ? 2.5 : 0.5);
+});
+}
+
+loadStats();
+loadGraph()
+  .then(RAW => { document.getElementById('status').textContent = ''; render(RAW); })
+  .catch(err => { document.getElementById('status').textContent = 'Failed to load graph: ' + err.message; });
+</script>
+</body>
+</html>
